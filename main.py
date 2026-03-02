@@ -1,6 +1,10 @@
+import os
+from io import BytesIO
+from lxml import etree
 from spyne import Application, rpc, ServiceBase, Integer, Float, Unicode, ComplexModel
 from spyne.protocol.soap import Soap11
 from spyne.server.wsgi import WsgiApplication
+from spyne.interface.wsdl import Wsdl11
 
 class ResultatTrajet(ComplexModel):
     """Structure de retour pour les résultats de calcul"""
@@ -69,12 +73,38 @@ application = Application([VehiculeElectriqueService],
     out_protocol=Soap11()
 )
 
-# Objet WSGI exposé pour Gunicorn (Azure App Service)
-# Gunicorn lancera: gunicorn main:app
-app = WsgiApplication(application)
+wsgi_app = WsgiApplication(application)
+
+def app(environ, start_response):
+    """Wrapper WSGI qui sert le WSDL sur GET ?wsdl"""
+    query = environ.get('QUERY_STRING', '')
+    method = environ.get('REQUEST_METHOD', 'GET')
+
+    if method == 'GET' and 'wsdl' in query.lower():
+        # Générer le WSDL dynamiquement
+        url = environ.get('HTTP_HOST', 'localhost')
+        scheme = environ.get('wsgi.url_scheme', 'https')
+        base_url = f"{scheme}://{url}/"
+
+        wsdl = Wsdl11(application.interface)
+        wsdl.build_interface_document(base_url)
+        wsdl_doc = wsdl.get_interface_document()
+
+        if isinstance(wsdl_doc, etree._Element):
+            wsdl_bytes = etree.tostring(wsdl_doc, xml_declaration=True, encoding='UTF-8')
+        else:
+            wsdl_bytes = wsdl_doc
+
+        start_response('200 OK', [
+            ('Content-Type', 'text/xml; charset=utf-8'),
+            ('Content-Length', str(len(wsdl_bytes)))
+        ])
+        return [wsdl_bytes]
+
+    # Pour tout le reste (POST SOAP), déléguer à Spyne
+    return wsgi_app(environ, start_response)
 
 if __name__ == '__main__':
-    import os
     from wsgiref.simple_server import make_server
 
     port = int(os.environ.get('SOAP_PORT', 8000))
